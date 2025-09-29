@@ -1,6 +1,6 @@
 import argparse
-from env.world import World
-from env.pose import Pose
+from src_env.world import World
+from src_env.pose import Pose
 from vehicles.diffdrive import DiffDrive
 from vehicles.ackermann import Ackermann
 from vehicles.truck_trailer import TruckTrailer, TTState
