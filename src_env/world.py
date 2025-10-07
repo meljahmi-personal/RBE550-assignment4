@@ -1,8 +1,8 @@
 # env/world.py
 from src_env.pose import Pose
-# if you later implement tetromino placement, import it here:
-# from env.tetromino import place_tetrominoes
+from src_env.tetromino import place_tetrominoes
 from src_env.parking import parking_bays_se
+
 
 class World:
     def __init__(self, n=12, cell=3.0, density=0.10, seed=0, trailer=False):
@@ -12,12 +12,18 @@ class World:
         self.seed = seed
         self.trailer = trailer
 
+
         # Occupancy in grid coords (i,j). Start with empty until tetromino is ready.
         self.occ = set()
+        
+        # create obstacles (as occupied cells)
+        self.occ = place_tetrominoes(n, target_occupancy=density, seed=seed)
+        
 
         # Clear NW start cells (we’ll keep them clear later too)
         self._clear_cell(0, 0)
         self._clear_cell(0, 1)
+      
 
         # Parking info (SE corner)
         self.parking = parking_bays_se(n, cell, trailer=trailer)

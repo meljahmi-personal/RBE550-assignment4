@@ -6,6 +6,7 @@ from vehicles.ackermann import Ackermann
 from vehicles.truck_trailer import TruckTrailer, TTState
 from geom.polygons import oriented_box
 from sim.animate import save_png
+from geom.collision import poly_intersect_sat
 
 def main():
     ap = argparse.ArgumentParser()
@@ -37,6 +38,10 @@ def main():
 
     save_png(world, obstacles, bays, vpoly, out)
     print(f"wrote {out}")
+
+    hit = any(poly_intersect_sat(vpoly, op) for op in obstacles)
+    print("start pose in collision?", hit)
+
 
 if __name__ == "__main__":
     main()
