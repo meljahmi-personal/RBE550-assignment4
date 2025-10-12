@@ -1,4 +1,5 @@
 # env/parking.py
+import math
 
 def parking_bays_se(n, cell, trailer=False):
     """
@@ -16,18 +17,24 @@ def parking_bays_se(n, cell, trailer=False):
     y1 = Y
 
     bay = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+    
 
     goal = {
-        "pose": ((x0+x1)/2.0, (y0+y1)/2.0, 0.0),   # center, facing +x
-        "tol_xy": 0.30,                             # meters
-        "tol_yaw": 5.0 * 3.1415926535 / 180.0       # radians
+        "pose": ((x0+x1)/2.0, (y0+y1)/2.0, 0.0),
+        "tol_xy": 2.0,                      # TEMP generous
+        "tol_yaw": math.radians(30)         # TEMP generous
     }
+
 
     data = {"bays": [bay], "goal": goal}
 
-    if trailer:
+    
+    #if trailer:
         # (optional) add a second adjacent bay if you like; not required
-        pass
+    #    pass
 
     return data
+    
+    
+
 

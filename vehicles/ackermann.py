@@ -3,7 +3,7 @@ import math
 from vehicles.base import State2D
 
 class Ackermann:
-    def __init__(self, length=5.20, width=1.80, wheelbase=2.80):
+    def __init__(self, length=2.8, width=4.5, wheelbase=1.80):
         # physical dimensions in meters
         self.length = length
         self.width = width
@@ -21,4 +21,7 @@ class Ackermann:
         ny = state.y + v * math.sin(state.theta) * dt
         nth = state.theta + (v / self.L) * math.tan(steer) * dt
         return State2D(nx, ny, nth)
+
+
+
 

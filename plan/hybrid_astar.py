@@ -5,47 +5,47 @@ from vehicles.base import State2D
 from geom.polygons import oriented_box
 from geom.collision import first_collision
 
-def _rollout(model, s: State2D, v, steer, T=1.0, dt=0.05):
-    """Integrate one control for duration T; return list[(x,y,th)] including start."""
-    poses = []
+
+IGNORE_COLLISIONS_FOR_BRINGUP = False
+
+
+def _wrap(a):  # -> [-pi, pi]
+    return (a + math.pi) % (2*math.pi) - math.pi
+
+def _rollout(model, s: State2D, v, steer, T=0.3, dt=0.05):
+    samples = []
+    cur = State2D(s.x, s.y, s.theta)
     t = 0.0
-    cur = s
     while t <= T + 1e-9:
-        poses.append((cur.x, cur.y, cur.theta))
+        samples.append((cur.x, cur.y, cur.theta))
         cur = model.step(cur, v, steer, dt)
         t += dt
-    return poses, cur  # samples + terminal state
+    return samples, cur
 
-def _heuristic(x, y, gx, gy):
-    # Euclidean is fine; heading term optional
-    return math.hypot(x - gx, y - gy)
-
-def _inside_goal(pose, goal):
-    (gx, gy, gth) = goal["pose"]
-    tol_xy = goal["tol_xy"]; tol_yaw = goal["tol_yaw"]
-    if abs(pose.x - gx) <= tol_xy and abs(pose.y - gy) <= tol_xy:
-        # normalize angle diff to [-pi, pi]
-        d = (pose.theta - gth + math.pi) % (2*math.pi) - math.pi
-        return abs(d) <= tol_yaw
+def _inside_goal(p: State2D, goal):
+    gx, gy, gth = goal["pose"]
+    tol_xy, tol_yaw = goal["tol_xy"], goal["tol_yaw"]
+    if math.hypot(p.x - gx, p.y - gy) <= tol_xy:
+        return abs(_wrap(p.theta - gth)) <= tol_yaw
     return False
 
-def _discretize(s: State2D, cell=0.5, dth=math.radians(15)):
-    """Quantize for visited set."""
-    return (int(round(s.x / cell)), int(round(s.y / cell)), int(round(s.theta / dth)))
+def _disc(s: State2D, cell=1.0, dth=math.radians(30)):
+    th = _wrap(s.theta)
+    return (int(round(s.x / cell)), int(round(s.y / cell)), int(round(th / dth)))
+
+
+def _heur(x, y, gx, gy, th=None, gth=None):
+    h = math.hypot(x - gx, y - gy)
+    return h if th is None else h + 0.5 * abs(_wrap(th - gth))  # was 0.25
+
 
 class HybridAStar:
-    """
-    Minimal Hybrid A* for the Ackermann car.
-    - State: continuous (x,y,theta)
-    - Controls: small set of (v, steer)
-    - Success: within goal tolerances
-    """
     def __init__(self, world, car: Ackermann,
-                 dt=0.05, step_T=1.0,
-                 steer_set=( -0.35, 0.0, 0.35 ),
-                 speed_set=( -1.0, 1.0 ),
-                 grid_cell=0.5,
-                 theta_bin=math.radians(15)):
+                 dt=0.05, step_T=0.3,
+                 steer_set=(-0.60, -0.30, 0.0, 0.30, 0.60),
+                 speed_set=(-1.0, 1.0),
+                 grid_cell=1.0,
+                 theta_bin=math.radians(30)):
         self.world = world
         self.car = car
         self.dt = dt
@@ -54,68 +54,63 @@ class HybridAStar:
         self.speed_set = speed_set
         self.grid_cell = grid_cell
         self.theta_bin = theta_bin
-
         self.obstacles = world.obstacles_as_polygons()
 
     def _edge_collision(self, samples):
-        """Return True if any sample collides."""
-        veh_polys = [oriented_box((x,y), self.car.length, self.car.width, th) for (x,y,th) in samples]
-        k, j = first_collision(veh_polys, self.obstacles)
+        if IGNORE_COLLISIONS_FOR_BRINGUP:
+            return False
+        if not self.obstacles:
+            return False
+        veh = [oriented_box((x,y), self.car.length, self.car.width, th) for (x,y,th) in samples]
+        k, _ = first_collision(veh, self.obstacles)
         return k is not None
 
-    def plan(self, start_pose, goal, iters_limit=20000):
-        start = State2D(start_pose.x, start_pose.y, start_pose.theta)
 
-        # early exit if start already in goal
+    def plan(self, start_pose, goal, iters_limit=200000):
+        start = State2D(start_pose.x, start_pose.y, start_pose.theta)
         if _inside_goal(start, goal):
             return [(start.x, start.y, start.theta)]
 
-        gx, gy, _ = goal["pose"]
-        openpq = []
-        g_cost = {}
+        gx, gy, gth = goal["pose"]
+        key0 = _disc(start, self.grid_cell, self.theta_bin)
+        g_cost = {key0: 0.0}
+        openpq = [( _heur(start.x, start.y, gx, gy, start.theta, gth), 0.0, start, key0 )]
         parent = {}
-
-        key0 = _discretize(start, self.grid_cell, self.theta_bin)
-        g_cost[key0] = 0.0
-        heapq.heappush(openpq, ( _heuristic(start.x, start.y, gx, gy), 0.0, start, key0 ))
-
         visited = set()
+        it = 0
 
-        iters = 0
-        while openpq and iters < iters_limit:
-            iters += 1
+        while openpq and it < iters_limit:
+            it += 1
             f, g, s, skey = heapq.heappop(openpq)
+            if it % 2000 == 0:
+                print(f"expanded={it}, open={len(openpq)}")
             if skey in visited:
                 continue
             visited.add(skey)
 
-            # goal check on continuous state
             if _inside_goal(s, goal):
-                # reconstruct
                 path = []
-                curk = skey
-                cur  = s
-                while curk in parent:
-                    path.append( (cur.x, cur.y, cur.theta) )
-                    curk, cur = parent[curk]
-                path.append( (start.x, start.y, start.theta) )
+                k = skey; cur = s
+                while k in parent:
+                    path.append((cur.x, cur.y, cur.theta))
+                    k, cur = parent[k]
+                path.append((start.x, start.y, start.theta))
                 path.reverse()
                 return path
+                
 
-            # expand
             for v in self.speed_set:
                 for steer in self.steer_set:
                     samples, s2 = _rollout(self.car, s, v, steer, self.step_T, self.dt)
-                    # skip if collision along edge
                     if self._edge_collision(samples):
                         continue
-                    k2 = _discretize(s2, self.grid_cell, self.theta_bin)
-                    newg = g + self.step_T * abs(v)  # path length cost
-                    if k2 not in g_cost or newg < g_cost[k2]:
+                    k2 = _disc(s2, self.grid_cell, self.theta_bin)
+                    newg = g + self.step_T*abs(v)
+                    if (k2 not in g_cost) or (newg < g_cost[k2]):
                         g_cost[k2] = newg
                         parent[k2] = (skey, s)
-                        h = _heuristic(s2.x, s2.y, gx, gy)
+                        h = _heur(s2.x, s2.y, gx, gy, s2.theta, gth)
                         heapq.heappush(openpq, (newg + h, newg, s2, k2))
 
-        return None  # no path (or iteration limit)
+        return None
 
