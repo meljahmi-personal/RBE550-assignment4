@@ -12,15 +12,65 @@ IGNORE_COLLISIONS_FOR_BRINGUP = False
 def _wrap(a):  # -> [-pi, pi]
     return (a + math.pi) % (2*math.pi) - math.pi
 
+
+def _get_step_fn(model):
+    """
+    Return a callable that advances the state one step.
+    Works with models exposing .step/.propagate/.integrate/.forward.
+    If none exist (e.g., TruckTrailerFollower), falls back to an internal
+    Ackermann integrator using the model's wheelbase (model.L).
+    """
+    # Try the common method names first
+    for name in ("step", "propagate", "integrate", "forward"):
+        if hasattr(model, name) and callable(getattr(model, name)):
+            return getattr(model, name)
+
+    # Fallback: simulate truck front using an Ackermann proxy
+    if hasattr(model, "L"):
+        inner = Ackermann(
+            length=getattr(model, "length", getattr(model, "truck_len", 4.5)),
+            width=getattr(model, "width", getattr(model, "truck_w", 2.0)),
+            wheelbase=model.L,  # ✅ correct keyword argument
+        )
+
+        def step_like(s, v, steer, dt):
+            """Fallback step using Ackermann kinematics."""
+            return inner.step(s, v, steer, dt)
+
+        return step_like
+
+    # If we reach here, no valid stepping method was found
+    raise AttributeError(
+        f"{type(model).__name__} has no step-like method "
+        "(tried: step, propagate, integrate, forward) and no 'L' for fallback."
+    )
+
+
+def _call_step_flex(step_fn, s, v, steer, dt):
+    """Best-effort call; normalize returns to State2D if needed."""
+    out = step_fn(s, v, steer, dt)
+    if isinstance(out, tuple) and len(out) >= 3:
+        return State2D(out[0], out[1], out[2])
+    if isinstance(out, tuple) and len(out) > 0:
+        return out[0]
+    return out
+
+
 def _rollout(model, s: State2D, v, steer, T=0.3, dt=0.05):
+    step_fn = _get_step_fn(model)
     samples = []
     cur = State2D(s.x, s.y, s.theta)
     t = 0.0
-    while t <= T + 1e-9:
+    max_iters = int(T / dt) + 2
+    it = 0
+    while t <= T + 1e-9 and it < max_iters:
         samples.append((cur.x, cur.y, cur.theta))
-        cur = model.step(cur, v, steer, dt)
+        cur = _call_step_flex(step_fn, cur, v, steer, dt)
         t += dt
+        it += 1
     return samples, cur
+
+
 
 def _inside_goal(p: State2D, goal):
     gx, gy, gth = goal["pose"]
@@ -61,9 +111,15 @@ class HybridAStar:
             return False
         if not self.obstacles:
             return False
-        veh = [oriented_box((x,y), self.car.length, self.car.width, th) for (x,y,th) in samples]
+
+        # Use vehicle dims if available; fall back sensibly
+        L = getattr(self.car, "length", getattr(self.car, "truck_len", 4.5))
+        W = getattr(self.car, "width",  getattr(self.car, "truck_w",  2.0))
+
+        veh = [oriented_box((x, y), L, W, th) for (x, y, th) in samples]
         k, _ = first_collision(veh, self.obstacles)
         return k is not None
+
 
 
     def plan(self, start_pose, goal, iters_limit=200000):

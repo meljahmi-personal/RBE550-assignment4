@@ -23,7 +23,7 @@ from src_env.world import World
 from src_env.pose import Pose
 from vehicles.diffdrive import DiffDrive
 from vehicles.ackermann import Ackermann
-from vehicles.truck_trailer import TruckTrailer, TTState
+from vehicles.truck_trailer import TruckTrailerFollower
 from geom.polygons import oriented_box
 from geom.collision import poly_intersect_sat, first_collision
 from sim.simulate import rollout_ackermann
@@ -156,19 +156,27 @@ def main():
     world = World(n=12, cell=3.0, density=args.density, seed=args.seed, trailer=trailer)
     obstacles = world.obstacles_as_polygons()
     bays = world.parking["bays"]
-
+    
+    
     if args.vehicle == "robot":
         model = DiffDrive()
         veh_length, veh_width = model.length, model.width
         out = "scene_robot.png"
+        gif_out = "robot_valet.gif"
+        planned_png = "planned_path_robot.png"
     elif args.vehicle == "car":
-        model = Ackermann()  # length/width/wheelbase set inside class
+        model = Ackermann()
         veh_length, veh_width = model.length, model.width
         out = "scene_car.png"
+        gif_out = "car_valet.gif"
+        planned_png = "planned_path_car.png"
     else:
-        model = TruckTrailer()
+        model = TruckTrailerFollower()
         veh_length, veh_width = model.truck_len, model.truck_w
         out = "scene_truck.png"
+        gif_out = "truck_valet.gif"
+        planned_png = "planned_path_truck.png"
+
 
     # Vehicle polygon at the start pose (for the static scene)
     start_pose = (world.start.x, world.start.y, world.start.theta)
@@ -234,10 +242,16 @@ def main():
     # if smoothing left too few frames, animate the original
     path_for_gif = path_smooth if len(path_smooth) >= 10 else path
 
-    path_xy = [(x, y) for (x, y, th) in path_smooth]  # keep smoothed for static PNG
-    save_path_png(world, obstacles, bays, path_xy, "planned_path.png")
-    save_gif_frames(world, obstacles, bays, path_for_gif, out="car_valet.gif")  # stride=1 in function
-    print("wrote planned_path.png and car_valet.gif")
+    #path_xy = [(x, y) for (x, y, th) in path_smooth]  # keep smoothed for static PNG
+    #save_path_png(world, obstacles, bays, path_xy, "planned_path.png")
+    #save_gif_frames(world, obstacles, bays, path_for_gif, out="car_valet.gif")  # stride=1 in function
+    #print("wrote planned_path.png and car_valet.gif")
+    
+    path_xy = [(x, y) for (x, y, th) in path_smooth]
+    save_path_png(world, obstacles, bays, path_xy, planned_png)
+    save_gif_frames(world, obstacles, bays, path_for_gif, out=gif_out)
+    print(f"wrote {planned_png} and {gif_out}")
+
 
     
 
