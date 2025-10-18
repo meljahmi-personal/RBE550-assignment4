@@ -7,6 +7,16 @@ from geom.collision import first_collision
 
 
 IGNORE_COLLISIONS_FOR_BRINGUP = False
+CLEARANCE_MARGIN_METERS = 0.19  # small gap so planned path doesn't hug obstacles
+#SAFETY_MARGIN_M = 0.12   # 20 cm inflation of the vehicle footprint for collision checks
+#MAX_EDGE_SAMPLE_SPACING = 0.10  # ≤30 cm between consecutive collision samples
+
+SAFETY_MARGIN_M = 0.19
+MAX_EDGE_SAMPLE_SPACING = 0.10
+# keep vehicle safely inside the map during rollouts & smoothing
+OUT_OF_BOUNDS_MARGIN_M = 0.00   # small tolerance so we don’t reject numerically-equal boundary
+
+
 
 
 def _wrap(a):  # -> [-pi, pi]
@@ -49,11 +59,22 @@ def _get_step_fn(model):
 def _call_step_flex(step_fn, s, v, steer, dt):
     """Best-effort call; normalize returns to State2D if needed."""
     out = step_fn(s, v, steer, dt)
+    if out is None:
+        # Defensive: keep previous state if a model returns None
+        return State2D(s.x, s.y, s.theta)
+    if isinstance(out, State2D):
+        return out
     if isinstance(out, tuple) and len(out) >= 3:
         return State2D(out[0], out[1], out[2])
     if isinstance(out, tuple) and len(out) > 0:
-        return out[0]
-    return out
+        # Some step() impls return (next_state, *extras)
+        nxt = out[0]
+        if isinstance(nxt, State2D):
+            return nxt
+        if isinstance(nxt, tuple) and len(nxt) >= 3:
+            return State2D(nxt[0], nxt[1], nxt[2])
+    # Last resort: pass through but ensure it looks like a State2D
+    return State2D(getattr(out, "x", s.x), getattr(out, "y", s.y), getattr(out, "theta", s.theta))
 
 
 def _rollout(model, s: State2D, v, steer, T=0.3, dt=0.05):
@@ -61,15 +82,19 @@ def _rollout(model, s: State2D, v, steer, T=0.3, dt=0.05):
     samples = []
     cur = State2D(s.x, s.y, s.theta)
     t = 0.0
-    max_iters = int(T / dt) + 2
+    # Hard cap against numerical drift (ensures loop terminates even if T/dt is imperfect)
+    max_iters = max(1, int(T / dt) + 3)
     it = 0
     while t <= T + 1e-9 and it < max_iters:
         samples.append((cur.x, cur.y, cur.theta))
-        cur = _call_step_flex(step_fn, cur, v, steer, dt)
+        nxt = _call_step_flex(step_fn, cur, v, steer, dt)
+        # Defensive: if a model returns NaNs or something invalid, stop this edge early
+        if not (math.isfinite(nxt.x) and math.isfinite(nxt.y) and math.isfinite(nxt.theta)):
+            break
+        cur = nxt
         t += dt
         it += 1
     return samples, cur
-
 
 
 def _inside_goal(p: State2D, goal):
@@ -78,6 +103,7 @@ def _inside_goal(p: State2D, goal):
     if math.hypot(p.x - gx, p.y - gy) <= tol_xy:
         return abs(_wrap(p.theta - gth)) <= tol_yaw
     return False
+
 
 def _disc(s: State2D, cell=1.0, dth=math.radians(30)):
     th = _wrap(s.theta)
@@ -106,20 +132,62 @@ class HybridAStar:
         self.theta_bin = theta_bin
         self.obstacles = world.obstacles_as_polygons()
 
+
+
+
+
     def _edge_collision(self, samples):
         if IGNORE_COLLISIONS_FOR_BRINGUP:
             return False
         if not self.obstacles:
             return False
 
-        # Use vehicle dims if available; fall back sensibly
+        # Vehicle dims with inflation
         L = getattr(self.car, "length", getattr(self.car, "truck_len", 4.5))
         W = getattr(self.car, "width",  getattr(self.car, "truck_w",  2.0))
+        L_eff = L + 2*SAFETY_MARGIN_M
+        W_eff = W + 2*SAFETY_MARGIN_M
 
-        veh = [oriented_box((x, y), L, W, th) for (x, y, th) in samples]
+        # Densify samples along the edge so we don’t slip between checks
+        pts = samples
+        dense = [pts[0]]
+        for i in range(1, len(pts)):
+            x0, y0, _   = pts[i-1]
+            x1, y1, th1 = pts[i]
+            seg = math.hypot(x1 - x0, y1 - y0)
+            n = max(1, int(seg / MAX_EDGE_SAMPLE_SPACING))
+            for k in range(1, n + 1):
+                t = k / n
+                dense.append((x0 + t*(x1 - x0), y0 + t*(y1 - y0), th1))
+
+        veh = [oriented_box((x, y), L_eff, W_eff, th) for (x, y, th) in dense]
         k, _ = first_collision(veh, self.obstacles)
         return k is not None
 
+
+    def _rollout_out_of_bounds(self, samples):
+        """
+        True if any inflated vehicle footprint vertex goes outside [0,W]x[0,H].
+        We skip the very first sample (the current node) so a start placed close to a
+        boundary may take a step that moves it back into a safe region.
+        """
+        W = self.world.grid_size_cells * self.world.cell_size_m
+        H = W  # square world
+        eps = OUT_OF_BOUNDS_MARGIN_M
+
+        # same dims as collision checks
+        L = getattr(self.car, "length", getattr(self.car, "truck_len", 4.5))
+        Wd = getattr(self.car, "width",  getattr(self.car, "truck_w",  2.0))
+        L_eff = L + 2*SAFETY_MARGIN_M
+        W_eff = Wd + 2*SAFETY_MARGIN_M
+
+        # SKIP the first sample (it equals the current state)
+        for (x, y, th) in samples[1:]:
+            box = oriented_box((x, y), L_eff, W_eff, th)
+            for (px, py) in box:
+                if px < -eps or py < -eps or px > W + eps or py > H + eps:
+                    return True
+        return False
 
 
     def plan(self, start_pose, goal, iters_limit=200000):
@@ -153,15 +221,18 @@ class HybridAStar:
                 path.append((start.x, start.y, start.theta))
                 path.reverse()
                 return path
-                
 
             for v in self.speed_set:
                 for steer in self.steer_set:
                     samples, s2 = _rollout(self.car, s, v, steer, self.step_T, self.dt)
+
                     if self._edge_collision(samples):
                         continue
+                    #if self._rollout_out_of_bounds(samples):
+                    #    continue
+
                     k2 = _disc(s2, self.grid_cell, self.theta_bin)
-                    newg = g + self.step_T*abs(v)
+                    newg = g + self.step_T * abs(v)
                     if (k2 not in g_cost) or (newg < g_cost[k2]):
                         g_cost[k2] = newg
                         parent[k2] = (skey, s)

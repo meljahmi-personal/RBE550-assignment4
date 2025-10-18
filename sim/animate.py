@@ -16,6 +16,12 @@ def draw_scene(ax, world, obstacles, bays, veh_poly=None):
     ax.set_aspect('equal', adjustable='box')
     ax.set_xlim(0, world.grid_size_cells * world.cell_size_m)
     ax.set_ylim(0, world.grid_size_cells * world.cell_size_m)
+    
+    # Draw outer world boundary (visual reference)
+    L = world.grid_size_cells * world.cell_size_m
+    ax.plot([0, L, L, 0, 0],
+            [0, 0, L, L, 0],
+            color="black", linewidth=1.5)
 
     # 🔹 Add gridlines and ticks for visual clarity (each cell = 3 m)
     ax.set_xticks([i * world.cell_size_m for i in range(world.grid_size_cells + 1)])
@@ -39,10 +45,10 @@ def draw_scene(ax, world, obstacles, bays, veh_poly=None):
     ax.set_title("Valet — static scene")
     
 
-def save_png(world, obstacles, bays, veh_poly, out_path):
+def save_png(world, obstacle_polygons, bays, vehicle_polygon, out_path):
     """Render one frame and save as a PNG."""
     fig, ax = plt.subplots(figsize=(6, 6))
-    draw_scene(ax, world, obstacles, bays, veh_poly)
+    draw_scene(ax, world, obstacle_polygons, bays, vehicle_polygon)
     fig.savefig(out_path, dpi=150, bbox_inches='tight')
     plt.close(fig)
 

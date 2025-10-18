@@ -28,7 +28,7 @@ from geom.polygons import oriented_box
 from geom.collision import poly_intersect_sat, first_collision
 from sim.simulate import rollout_ackermann
 from sim.animate import save_png, save_path_png, save_gif_frames
-from plan.hybrid_astar import HybridAStar
+from plan.hybrid_astar import HybridAStar, SAFETY_MARGIN_M, MAX_EDGE_SAMPLE_SPACING
 from geom.collision import first_collision
 
 
@@ -37,37 +37,43 @@ from geom.collision import first_collision
 YAW_SET = (0.0, math.pi/2, math.pi, -math.pi/2)
 
 
-def build_planner(world, model):
+def build_planner(world, model,
+                  dt=0.05,
+                  step_T=1.00,
+                  steer_set=(-0.60, -0.45, -0.30, 0.0, 0.30, 0.45, 0.60),
+                  speed_set=(-1.0, 1.0),
+                  grid_cell=1.0,
+                  theta_bin=math.radians(30)):
     """
-    Configure a maneuverable Hybrid A* planner.
-    These settings are intentionally permissive for bring-up.
-    Tighten later for nicer paths.
+    Configure a Hybrid A* planner.
+    Default uses larger rollout (step_T=1.00) for faster progress.
+    Callers can override step_T/steer_set for a finer retry.
     """
     return HybridAStar(
-            world, model,
-            dt=0.05,
-            step_T=1.00,  # was 0.30  ← makes each expansion actually go somewhere
-            steer_set=(-0.60, -0.45, -0.30, 0.0, 0.30, 0.45, 0.60),  # a touch richer
-            speed_set=(-1.0, 1.0),
-            grid_cell=1.0,
-            theta_bin=math.radians(30),
-        )
+        world, model,
+        dt=dt,
+        step_T=step_T,
+        steer_set=steer_set,
+        speed_set=speed_set,
+        grid_cell=grid_cell,
+        theta_bin=theta_bin,
+    )
+
+
 
 def try_plan_for_world(world, model):
-    
-    """Try Hybrid A* for several possible goal headings (same bay center).
-    Returns:
-        path: list[(x, y, theta)] or None"""
-    
-    for gth in YAW_SET:
-        gx, gy, _ = world.parking_info["goal"]["pose"]
-        world.parking_info["goal"]["pose"] = (gx, gy, gth)
+    goal = world.parking_info["goal"]
 
-        planner = build_planner(world, model)
-        path = planner.plan(world.start_pose, world.parking_info["goal"], iters_limit=200000)      
-        if path:
-            return path
-    return None
+    # Pass 1 — your current bring-up settings
+    planner = build_planner(world, model, step_T=1.00)
+    path = planner.plan(world.start_pose, goal, iters_limit=200000)
+    if path:
+        return path
+
+    # Pass 2 — finer rollout + richer steering set to thread tighter gaps
+    finer_steer = (-0.60, -0.45, -0.30, -0.15, 0.0, 0.15, 0.30, 0.45, 0.60)
+    planner = build_planner(world, model, step_T=0.35, steer_set=finer_steer)
+    return planner.plan(world.start_pose, goal, iters_limit=300000)
 
 
 
@@ -137,6 +143,60 @@ def shortcut(planner, path, trials=200, checks=20):
     return pts
 
 
+def choose_start_heading(world, model, obstacle_polygons,
+                         safety_margin_m=0.20,
+                         probe_distances_m=(1.5, 0.6),
+                         sample_step_m=0.10):
+    """
+    Pick a start yaw that points into free space from the NW start.
+    Tries headings in [east (0), south (-pi/2)] and returns the chosen theta.
+    If neither probe is clear, returns the current theta unchanged.
+
+    Uses the same inflated-vehicle footprint + discrete sampling you use in planning.
+    """
+    import math
+    from geom.polygons import oriented_box
+    from geom.collision import first_collision
+
+    # Effective vehicle dimensions (inflated)
+    veh_len = getattr(model, "length", getattr(model, "truck_len", 4.5))
+    veh_wid = getattr(model, "width",  getattr(model, "truck_w",  2.0))
+    L_eff = veh_len + 2.0 * safety_margin_m
+    W_eff = veh_wid + 2.0 * safety_margin_m
+
+    map_size = world.grid_size_cells * world.cell_size_m
+
+    def within_bounds(poly, eps=1e-3):
+        for (px, py) in poly:
+            if px < -eps or py < -eps or px > map_size + eps or py > map_size + eps:
+                return False
+        return True
+
+    def straight_feasible(x, y, th, dist_m):
+        steps = max(1, int(abs(dist_m) / sample_step_m))
+        dx = math.cos(th) * dist_m / steps
+        dy = math.sin(th) * dist_m / steps
+        cx, cy = x, y
+        for _ in range(steps + 1):
+            poly = oriented_box((cx, cy), L_eff, W_eff, th)
+            if not within_bounds(poly):
+                return False
+            hit, _ = first_collision([poly], obstacle_polygons)
+            if hit is not None:
+                return False
+            cx += dx; cy += dy
+        return True
+
+    x0, y0 = world.start_pose.x, world.start_pose.y
+    candidates = (0.0, -math.pi/2)  # east, south from NW
+
+    for d in probe_distances_m:                 # try longer, then shorter probe
+        for th in candidates:                   # try east, then south
+            if straight_feasible(x0, y0, th, d):
+                return th
+
+    return world.start_pose.theta               # unchanged if both fail
+
 
 
 def main():
@@ -199,6 +259,11 @@ def main():
         scene_image_path = "scene_truck.png"
         output_gif_path  = "truck_valet.gif"
         planned_path_image_path = "planned_path_truck.png"
+        
+
+    # Orient the car into free space (small, safe adjustment)
+    world.start_pose.theta = choose_start_heading(world, model, obstacle_polygons)
+
       
     # --------------------
     # Static scene PNG with vehicle footprint at start
@@ -270,7 +335,7 @@ def main():
             if tmp_path:
                 world = tmp_world
                 obstacles = world.obstacles_as_polygons()
-                bays = world.parking_info["bays"]
+                bays = world.parking_info["cells"]
                 path = tmp_path
                 print(f"planner: path found with seed {test_seed}")
                 break
@@ -293,9 +358,35 @@ def main():
     path_smoothed = shortcut(planner, path, trials=300, checks=30)
     print(f"smooth path with {len(path_smoothed)} poses")
 
-    # Use smoothed path for still image; ensure enough frames for GIF
-    planned_path = path_smoothed
-    path_for_gif = planned_path if len(planned_path) >= 10 else path
+
+    # Keep smoothed path only if it remains collision-free with the same inflation
+    L = getattr(model, "length", getattr(model, "truck_len", 4.5))
+    W = getattr(model, "width",  getattr(model, "truck_w",  2.0))
+    L_eff = L + 2*SAFETY_MARGIN_M
+    W_eff = W + 2*SAFETY_MARGIN_M
+    obs = obstacle_polygons  # already built above
+
+    def edge_hits(p0, p1):
+        x0,y0,th0 = p0; x1,y1,th1 = p1
+        seg = math.hypot(x1 - x0, y1 - y0)
+        n = max(1, int(seg / MAX_EDGE_SAMPLE_SPACING))
+        for k in range(n + 1):
+            t = k / n
+            x = x0 + t*(x1 - x0); y = y0 + t*(y1 - y0); th = th0 + t*(th1 - th0)
+            poly = oriented_box((x, y), L_eff, W_eff, th)
+            if any(first_collision([poly], [op])[0] is not None for op in obs):
+                return True
+        return False
+
+    smooth_ok = True
+    for i in range(len(path_smoothed) - 1):
+        if edge_hits(path_smoothed[i], path_smoothed[i+1]):
+            smooth_ok = False
+            break
+
+    path_for_gif = path_smoothed if (len(path_smoothed) >= 10 and smooth_ok) else path    
+    planned_path = path_for_gif
+
 
     # Save planned path PNG (xy only) with the vehicle footprint drawn at the goal pose
     path_xy = [(x, y) for (x, y, _) in planned_path]

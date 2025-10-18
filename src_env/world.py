@@ -76,7 +76,8 @@ def get_parking_bay_cells():
 
 def has_valid_clearance(occupied_cells):
     """Check that obstacle layout leaves sufficient boundary and corridor clearances."""
-    boundary_buffer_cells = math.ceil(MIN_CORRIDOR_WIDTH_METERS / GRID_CELL_SIZE_METERS)
+    boundary_buffer_cells = max(1, math.ceil(MIN_CORRIDOR_WIDTH_METERS / GRID_CELL_SIZE_METERS))
+
 
     # Reject obstacles that touch outer boundary
     for (col, row) in occupied_cells:
@@ -114,48 +115,112 @@ def has_valid_clearance(occupied_cells):
 
 
 def generate_random_obstacle_cells(obstacle_density, random_seed):
-    """Generate tetromino obstacles satisfying clearance constraints."""
+    """
+    Generate tetromino obstacles satisfying clearance constraints.
+
+    - 1-cell (3 m) clear ring along outer boundary.
+    - 1-cell moat between different tetromino pieces (not within a piece).
+    - NW start (2 cells) and SE parking bay reserved.
+    - Final validation via has_valid_clearance(..).
+    """
     random_generator = random.Random(random_seed)
     target_cell_count = int(round(GRID_SIZE_CELLS ** 2 * obstacle_density))
-    start_clear_cells = {(0, GRID_SIZE_CELLS - 1), (1, GRID_SIZE_CELLS - 1)}
-    parking_bay_cells = get_parking_bay_cells()
 
-    for _ in range(1000):
+    
+    # Reserve a safe moat for the start (NW), robust even with footprint inflation
+    start_clear_cells = {
+    (0, GRID_SIZE_CELLS - 1), (1, GRID_SIZE_CELLS - 1),
+    (0, GRID_SIZE_CELLS - 2), (1, GRID_SIZE_CELLS - 2),
+    }
+    parking_bay_cells = get_parking_bay_cells()
+    
+    
+    # Rough capacity clamp so we don't ask for more than can fit with the ring
+    BOUNDARY_CLEAR_RING_CELLS = 1
+    inner_n = max(0, GRID_SIZE_CELLS - 2 * BOUNDARY_CLEAR_RING_CELLS)
+    inner_cells = inner_n * inner_n
+    reserved_cells = len(start_clear_cells | parking_bay_cells)
+    max_placeable_cells = max(0, inner_cells - reserved_cells)
+    target_cell_count = min(target_cell_count, max_placeable_cells)
+
+    # Moat (gap) between different tetromino pieces, measured in cells
+    MIN_GAP_BETWEEN_SHAPES = 1
+
+    for _ in range(1000):  # resample attempts
         occupied_cells = set()
-        while len(occupied_cells) < target_cell_count:
+
+        MAX_PLACEMENT_TRIES = 5000
+        failed_tries = 0
+
+        while len(occupied_cells) < target_cell_count and failed_tries < MAX_PLACEMENT_TRIES:
             shape = random_generator.choice(list(TETROMINO_SHAPES.values()))
             rotation = random_generator.choice(ROTATION_FUNCTIONS)
             offset_col = random_generator.randrange(0, GRID_SIZE_CELLS)
             offset_row = random_generator.randrange(0, GRID_SIZE_CELLS)
 
+            # Build candidate tetromino in grid coordinates
             new_shape_cells = set()
             for (x, y) in shape:
-                rot_x, rot_y = rotation(x, y)
-                col = offset_col + rot_x
-                row = offset_row + rot_y
+                rx, ry = rotation(x, y)
+                col = offset_col + rx
+                row = offset_row + ry
                 if not (0 <= col < GRID_SIZE_CELLS and 0 <= row < GRID_SIZE_CELLS):
                     new_shape_cells = None
                     break
                 new_shape_cells.add((col, row))
             if not new_shape_cells:
+                failed_tries += 1
                 continue
 
-            # Skip if overlaps reserved areas or existing obstacles
+            # Skip if overlaps reserved areas or already-placed cells
             if (new_shape_cells & start_clear_cells or
-                    new_shape_cells & parking_bay_cells or
-                    new_shape_cells & occupied_cells):
+                new_shape_cells & parking_bay_cells or
+                new_shape_cells & occupied_cells):
+                failed_tries += 1
                 continue
 
+            # Keep a clear ring from the outer boundary
+            touches_boundary_ring = False
+            for (c, r) in new_shape_cells:
+                if not (BOUNDARY_CLEAR_RING_CELLS <= c < GRID_SIZE_CELLS - BOUNDARY_CLEAR_RING_CELLS and
+                        BOUNDARY_CLEAR_RING_CELLS <= r < GRID_SIZE_CELLS - BOUNDARY_CLEAR_RING_CELLS):
+                    touches_boundary_ring = True
+                    break
+            if touches_boundary_ring:
+                failed_tries += 1
+                continue
+
+            # Enforce moat: no new cell may be Chebyshev-distance 1 from any existing cell
+            too_close_to_existing = False
+            for (c, r) in new_shape_cells:
+                for dc in (-MIN_GAP_BETWEEN_SHAPES, 0, MIN_GAP_BETWEEN_SHAPES):
+                    for dr in (-MIN_GAP_BETWEEN_SHAPES, 0, MIN_GAP_BETWEEN_SHAPES):
+                        if (dc, dr) == (0, 0):
+                            continue
+                        if (c + dc, r + dr) in occupied_cells:
+                            too_close_to_existing = True
+                            break
+                    if too_close_to_existing:
+                        break
+                if too_close_to_existing:
+                    break
+            if too_close_to_existing:
+                failed_tries += 1
+                continue
+
+            # Accept this tetromino
             occupied_cells |= new_shape_cells
 
-        # Overwrite parking bay (ensure clear)
+        # Ensure parking bay is clear
         occupied_cells -= parking_bay_cells
 
+        # Final layout validation (boundary buffer, no 3/4 2×2 blocks, bay pad, etc.)
         if has_valid_clearance(occupied_cells):
             return occupied_cells, start_clear_cells, parking_bay_cells
 
-    # Fallback: return whatever we have; planner will handle failure gracefully
+    # Fallback: return the last attempt; planner will handle failure gracefully
     return occupied_cells, start_clear_cells, parking_bay_cells
+
 
 
 # ========================
@@ -200,7 +265,35 @@ class World:
         start_x = 0.5 * GRID_CELL_SIZE_METERS
         start_y = (GRID_SIZE_CELLS - 0.5) * GRID_CELL_SIZE_METERS
         self.start_pose = State2D(start_x, start_y, 0.0)
+        
 
+        half_L = 2.6  # conservative 5.2m / 2, covers the largest vehicle
+        half_W = 1.0  # conservative 2.0m / 2
+        W = GRID_SIZE_CELLS * GRID_CELL_SIZE_METERS
+
+        cx, cy, th = self.start_pose.x, self.start_pose.y, self.start_pose.theta
+        req_x = abs(half_L * math.cos(th)) + abs(half_W * math.sin(th))
+        req_y = abs(half_L * math.sin(th)) + abs(half_W * math.cos(th))
+
+        cx = max(req_x + 1e-2, min(W - req_x - 1e-2, cx))
+        cy = max(req_y + 1e-2, min(W - req_y - 1e-2, cy))
+        self.start_pose.x, self.start_pose.y = cx, cy
+        self.start_pose.theta = 0.0  # face east (into the map)
+
+        def _pick_inward_heading(x, y, W):
+            cands = (0.0, math.pi/2, math.pi, -math.pi/2)  # →, ↑, ←, ↓
+            def clearance(th):
+                dx, dy = math.cos(th), math.sin(th)
+                ts = []
+                if dx > 0:   ts.append((W - x)/dx)
+                elif dx < 0: ts.append((0 - x)/dx)
+                if dy > 0:   ts.append((W - y)/dy)
+                elif dy < 0: ts.append((0 - y)/dy)
+                return min(abs(t) for t in ts) if ts else 0.0
+            return max(cands, key=clearance)
+
+        Wm = self.grid_size_cells * self.cell_size_m
+        self.start_pose.theta = _pick_inward_heading(self.start_pose.x, self.start_pose.y, Wm)
 
 
     def obstacles_as_polygons(self):
