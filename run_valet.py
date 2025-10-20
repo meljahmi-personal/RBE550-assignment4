@@ -15,9 +15,9 @@ Usage examples:
   python3 run_valet.py --vehicle car --seed 0 --density 0.06
   python3 run_valet.py --vehicle car --density 0.00    # no obstacles (sanity)
 """
-import random
 import numpy as np
 import math
+import random
 import argparse
 from src_env.world import World
 from src_env.pose import Pose
@@ -30,6 +30,7 @@ from sim.simulate import rollout_ackermann
 from sim.animate import save_png, save_path_png, save_gif_frames
 from plan.hybrid_astar import HybridAStar, SAFETY_MARGIN_M, MAX_EDGE_SAMPLE_SPACING
 from geom.collision import first_collision
+from sim.animate import save_png, save_path_png, save_gif_frames
 
 
 
@@ -58,22 +59,6 @@ def build_planner(world, model,
         grid_cell=grid_cell,
         theta_bin=theta_bin,
     )
-
-
-
-def try_plan_for_world(world, model):
-    goal = world.parking_info["goal"]
-
-    # Pass 1 — your current bring-up settings
-    planner = build_planner(world, model, step_T=1.00)
-    path = planner.plan(world.start_pose, goal, iters_limit=200000)
-    if path:
-        return path
-
-    # Pass 2 — finer rollout + richer steering set to thread tighter gaps
-    finer_steer = (-0.60, -0.45, -0.30, -0.15, 0.0, 0.15, 0.30, 0.45, 0.60)
-    planner = build_planner(world, model, step_T=0.35, steer_set=finer_steer)
-    return planner.plan(world.start_pose, goal, iters_limit=300000)
 
 
 
@@ -198,173 +183,146 @@ def choose_start_heading(world, model, obstacle_polygons,
     return world.start_pose.theta               # unchanged if both fail
 
 
-
 def main():
-    # --------------------
+    # =========================================================
     # CLI
-    # --------------------
+    # =========================================================
     ap = argparse.ArgumentParser()
     ap.add_argument("--seed", type=int, default=0, help="world random seed")
     ap.add_argument("--density", type=float, default=0.10, help="obstacle occupancy (0..~0.15)")
     ap.add_argument("--vehicle", choices=["robot", "car", "truck"], default="car")
     args = ap.parse_args()
 
-    # --------------------
-    # World + vehicle
-    # --------------------
+    # =========================================================
+    # WORLD + VEHICLE
+    # =========================================================
     trailer = (args.vehicle == "truck")
     world = World(n=12, cell=3.0, density=args.density, seed=args.seed, trailer=trailer)
     obstacle_polygons = world.obstacles_as_polygons()
-     
-    # Build a single bay polygon from the SE bay cell set
-    cell_size = world.cell_size_m
-    bay_cells = world.parking_info["cells"]  # set of (col,row)
 
+    # Build parking bay polygon (SE) from this world's cells
+    cell_size = world.cell_size_m
+    bay_cells = world.parking_info["cells"]  # set of (col, row)
     min_col = min(c for (c, _) in bay_cells)
     max_col = max(c for (c, _) in bay_cells)
     min_row = min(r for (_, r) in bay_cells)
     max_row = max(r for (_, r) in bay_cells)
-
     minx =  min_col * cell_size
     maxx = (max_col + 1) * cell_size
     miny =  min_row * cell_size
     maxy = (max_row + 1) * cell_size
-
     bay_poly = [(minx, miny), (maxx, miny), (maxx, maxy), (minx, maxy)]
-    parking_bays = [bay_poly]   
-    
+    parking_bays = [bay_poly]
+
+    # Select vehicle model + output names
     if args.vehicle == "robot":
-        # Differential drive delivery robot
         model = DiffDrive()
         vehicle_length_meters = model.length
         vehicle_width_meters  = model.width
         scene_image_path = "scene_robot.png"
         output_gif_path  = "robot_valet.gif"
         planned_path_image_path = "planned_path_robot.png"
-
     elif args.vehicle == "car":
-        # Ackermann-steered police car
         model = Ackermann()
         vehicle_length_meters = model.length
         vehicle_width_meters  = model.width
         scene_image_path = "scene_car.png"
         output_gif_path  = "car_valet.gif"
         planned_path_image_path = "planned_path_car.png"
-
-    else:
-        # Truck with single trailer
+    else:  # truck (truck + trailer follower)
         model = TruckTrailerFollower()
         vehicle_length_meters = model.truck_len
         vehicle_width_meters  = model.truck_w
         scene_image_path = "scene_truck.png"
         output_gif_path  = "truck_valet.gif"
         planned_path_image_path = "planned_path_truck.png"
-        
 
-    # Orient the car into free space (small, safe adjustment)
-    world.start_pose.theta = choose_start_heading(world, model, obstacle_polygons)
+    # Simple, deterministic start yaw: point toward goal center
+    gx, gy, _ = world.parking_info["goal"]["pose"]
+    dx = gx - world.start_pose.x
+    dy = gy - world.start_pose.y
+    world.start_pose.theta = math.atan2(dy, dx)
 
-      
-    # --------------------
-    # Static scene PNG with vehicle footprint at start
-    # --------------------
-    # Vehicle polygon at the start pose
+    # =========================================================
+    # STATIC SCENE — draw obstacles, bay, and footprint at start
+    # =========================================================
     start_x, start_y, start_theta = world.start_pose.x, world.start_pose.y, world.start_pose.theta
-    vehicle_polygon_start = oriented_box(
-        (start_x, start_y),
-        vehicle_length_meters,
-        vehicle_width_meters,
-        start_theta,
-    )
-
-    # Save static scene
-    save_png(
-        world,
-        obstacle_polygons,
-        parking_bays,
-        vehicle_polygon_start,
-        scene_image_path,
-    )
+    vehicle_polygon_start = oriented_box((start_x, start_y),
+                                         vehicle_length_meters,
+                                         vehicle_width_meters,
+                                         start_theta)
+    save_png(world, obstacle_polygons, parking_bays, vehicle_polygon_start, scene_image_path)
     print(f"wrote {scene_image_path}")
 
     # Start collision check (sanity)
-    hit = any(poly_intersect_sat(vehicle_polygon_start, op) for op in obstacle_polygons)
-    print("start pose in collision?", hit)
+    k0, _ = first_collision([vehicle_polygon_start], obstacle_polygons)
+    print("start pose in collision?", k0 is not None)
 
-    # --------------------
-    # Short rollout demo and path overlay ("scene_path.png")
-    # Purpose: quick visual sanity check that rollouts and collision checks behave as expected.
-    # --------------------
-    trajectory_demo = rollout_ackermann(
-        world.start_pose, v=1.0, steer=0.35, T=2.0, dt=0.05
-    )  # list of (x, y, theta)
-
-    # Construct vehicle polygons along the demo trajectory for collision testing
-    vehicle_polygons_demo = [
-        oriented_box((x, y), vehicle_length_meters, vehicle_width_meters, theta)
-        for (x, y, theta) in trajectory_demo
-    ]
-
-    # Edge-collision check against obstacles (reports first colliding sample index or None)
+    # ---------------------------------------------------------
+    # STATIC SCENE + SHORT ROLLOUT OVERLAY (scene_path.png)
+    # quick sanity check of rollout & collision (uses car-style rollout)
+    # ---------------------------------------------------------
+    trajectory_demo = rollout_ackermann(world.start_pose, v=1.0, steer=0.35, T=2.0, dt=0.05)
+    vehicle_polygons_demo = [oriented_box((x, y), vehicle_length_meters, vehicle_width_meters, th)
+                             for (x, y, th) in trajectory_demo]
     k_demo, _ = first_collision(vehicle_polygons_demo, obstacle_polygons)
     print("edge collision on demo rollout:", (k_demo is not None), "at sample", k_demo)
 
-    # Save a PNG with the demo trajectory overlaid on the scene (no goal overlay here)
     path_xy_demo = [(x, y) for (x, y, _) in trajectory_demo]
-    save_path_png(
-        world,
-        obstacle_polygons,
-        parking_bays,
-        path_xy_demo,
-        "scene_path.png",
-    )
+    save_path_png(world, obstacle_polygons, parking_bays, path_xy_demo, "scene_path.png")
     print("wrote scene_path.png")
 
-    
-    # --------------------
-    # Hybrid A* — first try the requested seed
-    # --------------------
-    path = try_plan_for_world(world, model)
+    # =========================================================
+    # DYNAMIC SCENE — plan, (optionally) smooth, render planned PNG + GIF
+    # =========================================================
+    # Plan for requested seed
+    planned_path = try_plan_for_world(world, model)
 
-    # If not found, scan other seeds (REBUILD world + planner each time)
-    if path is None:
+    # If not found, scan other seeds (rebuild world each time)
+    if planned_path is None:
         print(f"planner: no path for seed {args.seed} - scanning other seeds...")
+        found = False
         for test_seed in range(0, 50):
             tmp_world = World(n=12, cell=3.0, density=args.density, seed=test_seed, trailer=trailer)
             tmp_path = try_plan_for_world(tmp_world, model)
             if tmp_path:
                 world = tmp_world
-                obstacles = world.obstacles_as_polygons()
-                bays = world.parking_info["cells"]
-                path = tmp_path
+                obstacle_polygons = world.obstacles_as_polygons()
+
+                # rebuild bay from this world's parking cells
+                cell_size = world.cell_size_m
+                bay_cells = world.parking_info["cells"]
+                min_col = min(c for (c, _) in bay_cells)
+                max_col = max(c for (c, _) in bay_cells)
+                min_row = min(r for (_, r) in bay_cells)
+                max_row = max(r for (_, r) in bay_cells)
+                minx =  min_col * cell_size
+                maxx = (max_col + 1) * cell_size
+                miny =  min_row * cell_size
+                maxy = (max_row + 1) * cell_size
+                bay_poly = [(minx, miny), (maxx, miny), (maxx, maxy), (minx, maxy)]
+                parking_bays = [bay_poly]
+
+                planned_path = tmp_path
                 print(f"planner: path found with seed {test_seed}")
+                found = True
                 break
+        if not found:
+            print("planner: no path found in first 50 seeds")
+            return
 
-    if path is None:
-        print("planner: no path found in first 50 seeds")
-        return
+    print(f"planner: path with {len(planned_path)} poses")
 
-    # --------------------
-    # Success → save outputs
-    # Planner results (path, smoothing, final PNG and GIF)
-    # Assumes `path` comes from planner.plan(...).
-    # --------------------
-    print(f"planner: path with {len(path)} poses")
-
-    # Build a planner instance in this scope for the shortcut smoother
-    planner = build_planner(world, model)
-
-    # Optional: shortcut smoothing
-    path_smoothed = shortcut(planner, path, trials=300, checks=30)
+    # Smoothing (shortcut); keep only if still collision-free
+    planner_for_smooth = build_planner(world, model)
+    path_smoothed = shortcut(planner_for_smooth, planned_path, trials=300, checks=30)
     print(f"smooth path with {len(path_smoothed)} poses")
 
-
-    # Keep smoothed path only if it remains collision-free with the same inflation
+    # Validate smoothed edges against inflated footprint
     L = getattr(model, "length", getattr(model, "truck_len", 4.5))
     W = getattr(model, "width",  getattr(model, "truck_w",  2.0))
     L_eff = L + 2*SAFETY_MARGIN_M
     W_eff = W + 2*SAFETY_MARGIN_M
-    obs = obstacle_polygons  # already built above
 
     def edge_hits(p0, p1):
         x0,y0,th0 = p0; x1,y1,th1 = p1
@@ -374,7 +332,7 @@ def main():
             t = k / n
             x = x0 + t*(x1 - x0); y = y0 + t*(y1 - y0); th = th0 + t*(th1 - th0)
             poly = oriented_box((x, y), L_eff, W_eff, th)
-            if any(first_collision([poly], [op])[0] is not None for op in obs):
+            if first_collision([poly], obstacle_polygons)[0] is not None:
                 return True
         return False
 
@@ -384,44 +342,74 @@ def main():
             smooth_ok = False
             break
 
-    path_for_gif = path_smoothed if (len(path_smoothed) >= 10 and smooth_ok) else path    
-    planned_path = path_for_gif
+    path_for_gif = path_smoothed if (len(path_smoothed) >= 10 and smooth_ok) else planned_path
 
+    # --------------------
+    # Planned path PNG (polyline + goal footprint[s])
+    # --------------------
+    path_xy = [(x, y) for (x, y, _) in path_for_gif]
 
-    # Save planned path PNG (xy only) with the vehicle footprint drawn at the goal pose
-    path_xy = [(x, y) for (x, y, _) in planned_path]
-    goal_x, goal_y, goal_theta = planned_path[-1]
+    # Main vehicle goal footprint
+    goal_x, goal_y, goal_th = path_for_gif[-1]
     vehicle_polygon_goal = oriented_box(
         (goal_x, goal_y),
         vehicle_length_meters,
         vehicle_width_meters,
-        goal_theta,
+        goal_th,
     )
-    save_path_png(
-        world,
-        obstacle_polygons,
-        parking_bays,
-        path_xy,
-        planned_path_image_path,
-        vehicle_polygon=vehicle_polygon_goal,
-    )
+    vehicle_polys = [vehicle_polygon_goal]
 
-    # Save animated GIF with moving vehicle footprint
+    # If truck, also overlay trailer at the goal
+    trailer_path = None
+    if args.vehicle == "truck":
+        if len(path_for_gif) >= 2:
+            trailer_goal_pose = model.trailer_poses([path_for_gif[-2], path_for_gif[-1]])[-1]
+        else:
+            trailer_goal_pose = model.trailer_poses([path_for_gif[-1]])[-1]
+        xt, yt, tht = trailer_goal_pose
+        trailer_polygon_goal = oriented_box((xt, yt), model.trailer_len, model.trailer_w, tht)
+        vehicle_polys.append(trailer_polygon_goal)
+
+    save_path_png(world, obstacle_polygons, parking_bays, path_xy, planned_path_image_path,
+                  vehicle_polygons=vehicle_polys)
+    print(f"wrote {planned_path_image_path}")
+
+    # --------------------
+    # Animated GIF
+    # --------------------
+    # Per-vehicle animation pacing (bigger = slower playback)
+    if args.vehicle == "car":
+        gif_delay = 0.16
+    elif args.vehicle == "truck":
+        gif_delay = 0.12
+    else:  # robot
+        gif_delay = 0.10
+
+    if args.vehicle == "truck":
+        trailer_path = model.trailer_poses(path_for_gif, dt_per_sample=0.2)
+
     save_gif_frames(
-        world,
-        obstacle_polygons,
-        parking_bays,
-        path_for_gif,
-        output_gif_path=output_gif_path,
-        vehicle_length_meters=vehicle_length_meters,
-        vehicle_width_meters=vehicle_width_meters,
-    )
+            world,
+            obstacle_polygons,
+            parking_bays,
+            path_for_gif,
+            output_gif_path,                 # filename (5th positional)
+            stride=1,                        # ensure int
+            vehicle_length_meters=vehicle_length_meters,
+            vehicle_width_meters=vehicle_width_meters,
+            frame_delay=gif_delay,
+            trailer_path=(model.trailer_poses(path_for_gif, dt_per_sample=0.2)
+                          if args.vehicle == "truck" else None),
+            trailer_length_meters=(model.trailer_len if args.vehicle == "truck" else None),
+            trailer_width_meters=(model.trailer_w   if args.vehicle == "truck" else None),
+        )
+
+
 
     print(f"wrote {planned_path_image_path} and {output_gif_path}")
 
 
 
-    
 
 if __name__ == "__main__":
     main()
