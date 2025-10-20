@@ -3,10 +3,9 @@ import math
 from vehicles.base import State2D
 
 class Ackermann:
-    def __init__(self, length=2.8, width=4.5, wheelbase=1.80):
-        # physical dimensions in meters
+    def __init__(self, length=5.2, width=1.8, wheelbase=2.8):
         self.length = length
-        self.width = width
+        self.width  = width
         self.L = wheelbase   # distance between front and rear axle
 
     def step(self, state: State2D, v: float, steer: float, dt: float) -> State2D:
