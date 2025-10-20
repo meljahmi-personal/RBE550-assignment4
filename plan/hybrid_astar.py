@@ -12,7 +12,7 @@ CLEARANCE_MARGIN_METERS = 0.19  # small gap so planned path doesn't hug obstacle
 #MAX_EDGE_SAMPLE_SPACING = 0.10  # ≤30 cm between consecutive collision samples
 
 SAFETY_MARGIN_M = 0.19
-MAX_EDGE_SAMPLE_SPACING = 0.10
+MAX_EDGE_SAMPLE_SPACING = 0.20
 # keep vehicle safely inside the map during rollouts & smoothing
 OUT_OF_BOUNDS_MARGIN_M = 0.00   # small tolerance so we don’t reject numerically-equal boundary
 
@@ -117,7 +117,7 @@ def _heur(x, y, gx, gy, th=None, gth=None):
 
 class HybridAStar:
     def __init__(self, world, car: Ackermann,
-                 dt=0.05, step_T=0.3,
+                 dt=0.03, step_T=0.2,
                  steer_set=(-0.60, -0.30, 0.0, 0.30, 0.60),
                  speed_set=(-1.0, 1.0),
                  grid_cell=1.0,
@@ -134,19 +134,28 @@ class HybridAStar:
 
 
 
-
-
     def _edge_collision(self, samples):
         if IGNORE_COLLISIONS_FOR_BRINGUP:
             return False
         if not self.obstacles:
             return False
 
-        # Vehicle dims with inflation
-        L = getattr(self.car, "length", getattr(self.car, "truck_len", 4.5))
-        W = getattr(self.car, "width",  getattr(self.car, "truck_w",  2.0))
-        L_eff = L + 2*SAFETY_MARGIN_M
-        W_eff = W + 2*SAFETY_MARGIN_M
+        # Detect if this is a truck+trailer model (attribute names per your file)
+        has_trailer = any(hasattr(self.car, nm) for nm in ("trailer_len", "trailer_w", "d1", "hitch_d"))
+
+        # Vehicle dims (inflated) for the primary body
+        L_truck = getattr(self.car, "length", getattr(self.car, "truck_len", 4.5))
+        W_truck = getattr(self.car, "width",  getattr(self.car, "truck_w",  2.0))
+        L_eff_truck = L_truck + 2*SAFETY_MARGIN_M
+        W_eff_truck = W_truck + 2*SAFETY_MARGIN_M
+
+        # Trailer dims (inflated), if present
+        if has_trailer:
+            L_trailer = getattr(self.car, "trailer_len", 4.5)
+            W_trailer = getattr(self.car, "trailer_w",  2.0)
+            d_hitch   = getattr(self.car, "d1", getattr(self.car, "hitch_d", 5.0))
+            L_eff_trailer = L_trailer + 2*SAFETY_MARGIN_M
+            W_eff_trailer = W_trailer + 2*SAFETY_MARGIN_M
 
         # Densify samples along the edge so we don’t slip between checks
         pts = samples
@@ -158,11 +167,32 @@ class HybridAStar:
             n = max(1, int(seg / MAX_EDGE_SAMPLE_SPACING))
             for k in range(1, n + 1):
                 t = k / n
+                # linear interp x,y ; theta use last (short step) — good enough for dense samples
                 dense.append((x0 + t*(x1 - x0), y0 + t*(y1 - y0), th1))
 
-        veh = [oriented_box((x, y), L_eff, W_eff, th) for (x, y, th) in dense]
-        k, _ = first_collision(veh, self.obstacles)
-        return k is not None
+        # Build footprints and test collision
+        for (x, y, th) in dense:
+            # Truck rectangle (centered at truck ref pose (x,y,th))
+            poly_truck = oriented_box((x, y), L_eff_truck, W_eff_truck, th)
+
+            # Check truck first
+            k, _ = first_collision([poly_truck], self.obstacles)
+            if k is not None:
+                return True
+
+            # Trailer rectangle, if any
+            if has_trailer:
+                # Trailer reference at axle center, approx aligned with truck heading (low-speed)
+                xt = x - d_hitch * math.cos(th)
+                yt = y - d_hitch * math.sin(th)
+                th_trailer = th  # simplest robust approximation; your model may provide a better one
+                poly_trailer = oriented_box((xt, yt), L_eff_trailer, W_eff_trailer, th_trailer)
+                k2, _ = first_collision([poly_trailer], self.obstacles)
+                if k2 is not None:
+                    return True
+
+        return False
+
 
 
     def _rollout_out_of_bounds(self, samples):
