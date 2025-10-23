@@ -253,14 +253,15 @@ class World:
         self.parking_info = {
             "cells": parking_bay_cells,
             "goal": {
-                "pose": ((GRID_SIZE_CELLS - 1.5) * GRID_CELL_SIZE_METERS,
-                         (1.5) * GRID_CELL_SIZE_METERS,
-                         0.0),
+                "pose": (
+                    (GRID_SIZE_CELLS - 1.5) * GRID_CELL_SIZE_METERS,
+                    (1.5) * GRID_CELL_SIZE_METERS,
+                    math.pi  # face WEST into the parking bay
+                ),
                 "tol_xy": 1.0,
                 "tol_yaw": math.radians(10)
             }
         }
-
         # Start pose at NW corner, facing east
         start_x = 0.5 * GRID_CELL_SIZE_METERS
         start_y = (GRID_SIZE_CELLS - 0.5) * GRID_CELL_SIZE_METERS

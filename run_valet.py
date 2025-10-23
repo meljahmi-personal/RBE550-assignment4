@@ -31,6 +31,8 @@ from sim.animate import save_png, save_path_png, save_gif_frames
 from plan.hybrid_astar import HybridAStar, SAFETY_MARGIN_M, MAX_EDGE_SAMPLE_SPACING
 from geom.collision import first_collision
 from sim.animate import save_png, save_path_png, save_gif_frames
+from logger_metrics import log_metrics
+import time
 
 
 
@@ -78,6 +80,9 @@ def try_plan_for_world(world, model):
         )
 
         path = planner.plan(world.start_pose, world.parking_info["goal"], iters_limit=200000)
+        model._last_expanded = getattr(planner, "expanded", 0)  
+        model._last_seed_used = getattr(world, "seed", None)    
+
         if path:
             return path
     return None
@@ -276,7 +281,28 @@ def main():
     # DYNAMIC SCENE — plan, (optionally) smooth, render planned PNG + GIF
     # =========================================================
     # Plan for requested seed
+    t0 = time.perf_counter()
     planned_path = try_plan_for_world(world, model)
+    # your existing loop that rebuilds world/seed and calls try_plan_for_world again
+    planned_path = try_plan_for_world(world, model)
+    if not planned_path:
+        # your fallback loop
+        for s in range(0, 50):
+            tmp_world = World(n=12, cell=3.0, density=args.density, seed=s, trailer=trailer)
+            planned_path = try_plan_for_world(tmp_world, model)
+            if planned_path:
+                world = tmp_world
+                break
+
+    elapsed = time.perf_counter() - t0
+    
+    expanded_nodes = getattr(model, "_last_expanded", 0)
+    final_seed     = getattr(model, "_last_seed_used", args.seed)
+    if planned_path:
+        log_metrics(args.vehicle, args.density, final_seed, elapsed, expanded_nodes, planned_path)
+        print(f"[LOGGED] vehicle={args.vehicle} density={args.density:.2f} seed={final_seed} "
+              f"runtime={elapsed:.2f}s expanded={expanded_nodes}")
+
 
     # If not found, scan other seeds (rebuild world each time)
     if planned_path is None:
@@ -343,35 +369,43 @@ def main():
             break
 
     path_for_gif = path_smoothed if (len(path_smoothed) >= 10 and smooth_ok) else planned_path
-
+    
+    
+    
     # --------------------
-    # Planned path PNG (polyline + goal footprint[s])
+    # Planned path PNG (polyline + goal footprint[s] at the EXACT goal pose)
     # --------------------
     path_xy = [(x, y) for (x, y, _) in path_for_gif]
 
-    # Main vehicle goal footprint
-    goal_x, goal_y, goal_th = path_for_gif[-1]
+    # Use the exact goal pose specified in the world (faces WEST via math.pi)
+    gx, gy, gth = world.parking_info["goal"]["pose"]
+
+    # Main vehicle goal footprint at the exact goal pose
     vehicle_polygon_goal = oriented_box(
-        (goal_x, goal_y),
+        (gx, gy),                     # <— position from goal pose
         vehicle_length_meters,
         vehicle_width_meters,
-        goal_th,
+        gth                           # <— heading from goal pose (π = west)
     )
     vehicle_polys = [vehicle_polygon_goal]
 
-    # If truck, also overlay trailer at the goal
-    trailer_path = None
+    # If truck, also stamp the trailer at the goal pose (derived from truck goal)
     if args.vehicle == "truck":
-        if len(path_for_gif) >= 2:
-            trailer_goal_pose = model.trailer_poses([path_for_gif[-2], path_for_gif[-1]])[-1]
-        else:
-            trailer_goal_pose = model.trailer_poses([path_for_gif[-1]])[-1]
+        # trailer pose computed from a single truck goal pose
+        trailer_goal_pose = model.trailer_poses([(gx, gy, gth)])[-1]
         xt, yt, tht = trailer_goal_pose
         trailer_polygon_goal = oriented_box((xt, yt), model.trailer_len, model.trailer_w, tht)
         vehicle_polys.append(trailer_polygon_goal)
 
-    save_path_png(world, obstacle_polygons, parking_bays, path_xy, planned_path_image_path,
-                  vehicle_polygons=vehicle_polys)
+    # Save the planned path image with the red goal footprint(s)
+    save_path_png(
+        world,
+        obstacle_polygons,
+        parking_bays,
+        path_xy,
+        planned_path_image_path,
+        vehicle_polygons=vehicle_polys,   # NOTE: list of polygons
+    )
     print(f"wrote {planned_path_image_path}")
 
     # --------------------

@@ -235,6 +235,7 @@ class HybridAStar:
 
         while openpq and it < iters_limit:
             it += 1
+            self.expanded = it 
             f, g, s, skey = heapq.heappop(openpq)
             if it % 2000 == 0:
                 print(f"expanded={it}, open={len(openpq)}")
