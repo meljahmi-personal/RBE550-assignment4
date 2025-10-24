@@ -204,6 +204,20 @@ def main():
     trailer = (args.vehicle == "truck")
     world = World(n=12, cell=3.0, density=args.density, seed=args.seed, trailer=trailer)
     obstacle_polygons = world.obstacles_as_polygons()
+    
+    #==============================================================
+    # Validation prints
+    #==============================================================
+    
+    grid = world.grid; W, H = world.W, world.H
+    nw_ok = (grid[0,0] == 0 and grid[0,1] == 0)  # two NW cells free
+    bay_ok = all(grid[y, x] == 0 for x in range(W-2, W) for y in range(H-2, H))
+    occ = int(grid.sum()); total = W * H
+    print("NW start cells clear:", nw_ok)
+    print("SE bay cleared (overwrites obstacles):", bay_ok)
+    print(f"Obstacle density: {occ/total:.1%} (target ~10%)")
+
+    #==============================================================
 
     # Build parking bay polygon (SE) from this world's cells
     cell_size = world.cell_size_m

@@ -7,7 +7,7 @@ obstacles.  Ensures adequate clearances for the largest vehicle (truck
 with trailer), clears the start region in the northwest corner, and
 defines a parking bay in the southeast corner.
 """
-
+import numpy as np
 import math
 import random
 from vehicles.base import State2D
@@ -213,6 +213,57 @@ def generate_random_obstacle_cells(obstacle_density, random_seed):
 
         # Ensure parking bay is clear
         occupied_cells -= parking_bay_cells
+        
+        
+    # --- Flanking obstacles but leave an entrance gap centered on bay ---
+    # parking_bay_cells is a set of (col,row)
+    bay_cols = sorted({c for (c, r) in parking_bay_cells})
+    bay_rows = sorted({r for (c, r) in parking_bay_cells})
+    min_c, max_c = bay_cols[0], bay_cols[-1]
+    min_r, max_r = bay_rows[0], bay_rows[-1]
+
+    # Entrance parameters (in cells): leave gap_width cells free in the flank to act as entrance
+    # Choose gap_width = 2 (2*3m = 6m) to be safe for truck; set 1 for smaller vehicles
+    gap_width = 2
+
+    # Entrance center row: choose the middle row of the bay (for small bay this will center)
+    entrance_center_row = (min_r + max_r) // 2
+
+    # Rows that will remain free for the entrance
+    entrance_rows = []
+    half_gap = gap_width // 2
+    for dr in range(-half_gap, half_gap + (gap_width % 2)):
+        r = entrance_center_row + dr
+        if 0 <= r < GRID_SIZE_CELLS:
+            entrance_rows.append(r)
+
+    # WEST flank (cells immediately to the left of bay)
+    left_flank_col = min_c - 1
+    if 0 <= left_flank_col < GRID_SIZE_CELLS:
+        for r in bay_rows:
+            if r in entrance_rows:
+                continue  # keep entrance open here
+            if (left_flank_col, r) not in parking_bay_cells:
+                occupied_cells.add((left_flank_col, r))
+
+    # EAST flank (cells immediately to the right of bay)
+    right_flank_col = max_c + 1
+    if 0 <= right_flank_col < GRID_SIZE_CELLS:
+        for r in bay_rows:
+            if r in entrance_rows:
+                continue
+            if (right_flank_col, r) not in parking_bay_cells:
+                occupied_cells.add((right_flank_col, r))
+
+    # Optional: place a cap (north) but leave entrance rows free
+    north_cap_row = max_r + 1
+    if 0 <= north_cap_row < GRID_SIZE_CELLS:
+        for c in bay_cols:
+            if (c, north_cap_row) not in parking_bay_cells and north_cap_row not in entrance_rows:
+                occupied_cells.add((c, north_cap_row))
+    # --- end flanks with entrance gap ---
+
+
 
         # Final layout validation (boundary buffer, no 3/4 2×2 blocks, bay pad, etc.)
         if has_valid_clearance(occupied_cells):
@@ -236,51 +287,64 @@ class World:
                  density: float = 0.10,
                  seed: int = 7,
                  trailer: bool = False):
-        """
-        Args:
-            n (int): Grid size in cells (ignored; always 12×12).
-            cell (float): Cell size in meters (ignored; always 3.0 m).
-            density (float): Obstacle density (0–1).
-            seed (int): Random seed.
-            trailer (bool): Ignored parameter for backward compatibility.
-        """
+
+        # 0) Generate cells first (gives you occupied_cells & parking_bay_cells)
         occupied_cells, start_clear_cells, parking_bay_cells = \
             generate_random_obstacle_cells(density, seed)
 
+        # 1) Build & store grid + dims (what run_valet.py expects)
+        #    (make sure you have `import numpy as np` at the top of the file)
+        grid = np.zeros((GRID_SIZE_CELLS, GRID_SIZE_CELLS), dtype=np.uint8)
+        for (col, row) in occupied_cells:
+            grid[row, col] = 1
+        for (col, row) in parking_bay_cells:   # keep bay clear
+            grid[row, col] = 0
+
+        self.grid = grid
+        self.W = GRID_SIZE_CELLS
+        self.H = GRID_SIZE_CELLS
+
+        # 2) Store meters/cell metadata
         self.cell_size_m = GRID_CELL_SIZE_METERS
         self.grid_size_cells = GRID_SIZE_CELLS
+
+        # 3) Convert obstacles to meter-polygons (used by planner/SAT)
         self.obstacle_polygons = convert_cells_to_polygons(occupied_cells)
+
+        # 4) Parking goal in SE bay (meters). Facing WEST into bay is fine.
         self.parking_info = {
             "cells": parking_bay_cells,
             "goal": {
                 "pose": (
-                    (GRID_SIZE_CELLS - 1.5) * GRID_CELL_SIZE_METERS,
-                    (1.5) * GRID_CELL_SIZE_METERS,
-                    math.pi  # face WEST into the parking bay
+                    (GRID_SIZE_CELLS - 1.5) * GRID_CELL_SIZE_METERS,  # x
+                    (1.5) * GRID_CELL_SIZE_METERS,                    # y  (adjust if your y-axis is flipped)
+                    math.pi                                            # yaw (west)
                 ),
                 "tol_xy": 1.0,
                 "tol_yaw": math.radians(10)
             }
         }
-        # Start pose at NW corner, facing east
+
+        # 5) Start pose at NW corner (meters) — pick the one matching your coord convention:
+        # If y increases UP: use (0.5, GRID_SIZE_CELLS-0.5)
+        # If y increases DOWN (image-style): use (0.5, 0.5)       
         start_x = 0.5 * GRID_CELL_SIZE_METERS
-        start_y = (GRID_SIZE_CELLS - 0.5) * GRID_CELL_SIZE_METERS
+        start_y = (GRID_SIZE_CELLS - 0.5) * GRID_CELL_SIZE_METERS   # NW: top row center
         self.start_pose = State2D(start_x, start_y, 0.0)
-        
 
-        half_L = 2.6  # conservative 5.2m / 2, covers the largest vehicle
-        half_W = 1.0  # conservative 2.0m / 2
-        W = GRID_SIZE_CELLS * GRID_CELL_SIZE_METERS
 
+        # 6) Clamp start inside bounds using a conservative footprint
+        half_L = 2.6  # ~5.2/2 m
+        half_W = 1.0  # ~2.0/2 m
+        Wm = GRID_SIZE_CELLS * GRID_CELL_SIZE_METERS
         cx, cy, th = self.start_pose.x, self.start_pose.y, self.start_pose.theta
         req_x = abs(half_L * math.cos(th)) + abs(half_W * math.sin(th))
         req_y = abs(half_L * math.sin(th)) + abs(half_W * math.cos(th))
-
-        cx = max(req_x + 1e-2, min(W - req_x - 1e-2, cx))
-        cy = max(req_y + 1e-2, min(W - req_y - 1e-2, cy))
+        cx = max(req_x + 1e-2, min(Wm - req_x - 1e-2, cx))
+        cy = max(req_y + 1e-2, min(Wm - req_y - 1e-2, cy))
         self.start_pose.x, self.start_pose.y = cx, cy
-        self.start_pose.theta = 0.0  # face east (into the map)
 
+        # 7) Point start heading inward (simple heuristic)
         def _pick_inward_heading(x, y, W):
             cands = (0.0, math.pi/2, math.pi, -math.pi/2)  # →, ↑, ←, ↓
             def clearance(th):
@@ -293,7 +357,6 @@ class World:
                 return min(abs(t) for t in ts) if ts else 0.0
             return max(cands, key=clearance)
 
-        Wm = self.grid_size_cells * self.cell_size_m
         self.start_pose.theta = _pick_inward_heading(self.start_pose.x, self.start_pose.y, Wm)
 
 
