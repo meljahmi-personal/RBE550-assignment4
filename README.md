@@ -13,14 +13,7 @@ This project assumes use of **Git over SSH** and a Linux environment.
 ```bash
 # Clone using SSH
 git clone git@github.com:meljahmi-personal/RBE550-assignment4.git
-cd RBE550-assignment4/src
-```
-
-## Rebuild permissions for executable scripts:
-# Ensure run scripts are executable
-```bash
-chmod +x run_all.sh
-chmod +x run_valet.py
+cd RBE550-assignment4
 ```
 
 # Build environment
@@ -33,6 +26,17 @@ source hw4env/bin/activate
 ```bash
 pip install -r requirements.txt
 ```
+
+## Rebuild permissions for executable scripts:
+# Ensure run scripts are executable
+```bash
+chmod +x run_all.sh
+chmod +x run_valet.py
+```
+
+
+
+
 ## Repository Layout
 geom/          # Collision and geometry utilities (SAT-based)
 plan/          # Hybrid A* planner implementation
