@@ -18,15 +18,14 @@ cd RBE550-assignment4
 
 ## Repository Layout
 .
-├── geom                        # Collision and geometry utilities (SAT-based)
+├── geom                                # Collision and geometry utilities (SAT-based)
 │   ├── collision.py
 │   └── polygons.py
-├── logger_metrics.py
-├── logger.py
-├── plan                        # Hybrid A* planner implementation                       
+├── logger_metrics.py                   # Creation of metric for the runs
+├── plan                                # Hybrid A* planner implementation
 │   └── hybrid_astar.py
-├── README.md
-├── report                      # Main report and Sections 6.x standalone PDFs
+├── README.md                           # Mark Down file.
+├── report                              # Main report and Sections 6.x standalone PDFs and word documents
 │   ├── meljahmi_RBE550_HW4.docx
 │   ├── meljahmi_RBE550_HW4.pdf
 │   ├── RBE550_HW4_Section6_2_Planner_Artifacts.docx
@@ -35,23 +34,24 @@ cd RBE550-assignment4
 │   ├── RBE550_HW4_Section6_3_collision_detection.pdf
 │   ├── RBE550_HW4_Section6_5_Path_Animation.docx
 │   └── RBE550_HW4_Section6_5_Path_Animation.pdf
-├── requirements.txt            # List of python modules to install
-├── run_all.sh                  # Batch runner for all vehicle types
-├── run_valet.py                # Main Hybrid A* runner
-├── sim                         # Animation and rendering scripts
+├── requirements.txt                    # Python modules names and versions. To be used by pip
+├── run_all.sh                          # Batch runner for all vehicle types
+├── run_valet.py                        # Main Hybrid A* runner
+├── sim                                 # Animation and rendering scripts
 │   ├── animate.py
 │   └── simulate.py
-├── src_env                     # World generation, tetromino obstacles, parking bay
+├── src_env                             # World generation, tetromino obstacles, parking bay
 │   ├── parking.py
 │   ├── pose.py
 │   ├── tetromino.py
 │   └── world.py
-├── system.info                 # System type - Linux, windows, etc.
-└── vehicles                    # Vehicle models: diffdrive, car, truck+trailer
+├── system.info                        # System info Linux version and Python modules names and versions
+└── vehicles                           # Vehicle models: diffdrive, car, truck+trailer
     ├── ackermann.py
     ├── base.py
     ├── diffdrive.py
     └── truck_trailer.py
+
 
 6 directories, 28 files
 
